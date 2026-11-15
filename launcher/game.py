@@ -32,6 +32,11 @@ _MIRRORS = {
     "launcher.mojang.com": "https://bmclapi2.bangbang93.com",
     "libraries.minecraft.net": "https://bmclapi2.bangbang93.com/maven",
     "resources.download.minecraft.net": "https://bmclapi2.bangbang93.com/assets",
+    "maven.neoforged.net": "https://bmclapi2.bangbang93.com/maven",
+}
+# Mirror paths that drop a leading segment of the original path.
+_MIRROR_STRIP = {
+    "maven.neoforged.net": "/releases",
 }
 
 
@@ -41,7 +46,11 @@ def _download_urls(url: str) -> list[str]:
     root = _MIRRORS.get(host)
     if root is None:
         return [url]
-    mirror = root + parsed.path
+    path = parsed.path
+    strip = _MIRROR_STRIP.get(host)
+    if strip and path.startswith(strip + "/"):
+        path = path[len(strip):]
+    mirror = root + path
     if parsed.query:
         mirror += "?" + parsed.query
     if host in _SLOW_HOSTS:
