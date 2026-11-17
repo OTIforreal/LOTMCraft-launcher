@@ -65,6 +65,9 @@ class DriveSync:
         wanted = {name.casefold() for name in enabled}
         chosen = [name for name in names if name.casefold() in wanted]
         if not mods_changed and not optional_changed and any((instance_dir() / "mods").glob("*.jar")):
+            removed = _remove_foreign_mods(mod_archives, optional_path if optional_listed else None, chosen)
+            if removed:
+                status(f"Removed mods that are not part of the modpack: {', '.join(removed)}")
             _fix_fabric_versions()
             text = "Mods are up to date"
             if not optional_listed:
@@ -420,6 +423,27 @@ def _install_mods(required: list[Path], optional: Path | None, chosen: list[str]
         if folded not in required_names and folded not in optional_names:
             local.unlink()
     return len(required_names), len(optional_names)
+
+
+def _remove_foreign_mods(required: list[Path], optional: Path | None, chosen: list[str]) -> list[str]:
+    """Delete jars in mods/ that come from neither the modpack nor the enabled optional mods."""
+    allowed = set()
+    for archive in required:
+        allowed |= {name.casefold() for name in _jar_names(archive)}
+    if not allowed:
+        return []
+    optional_names = {name.casefold() for name in _jar_names(optional)} if optional is not None else set()
+    allowed |= {name.casefold() for name in chosen if name.casefold() in optional_names}
+    removed = []
+    for local in sorted((instance_dir() / "mods").glob("*.jar")):
+        if local.name.casefold() in allowed:
+            continue
+        try:
+            local.unlink()
+        except OSError:
+            continue
+        removed.append(local.name)
+    return removed
 
 
 def _write_jars(archive: Path, mods: Path, only: set[str] | None, pack: bool, skip: set[str] | None = None) -> set[str]:

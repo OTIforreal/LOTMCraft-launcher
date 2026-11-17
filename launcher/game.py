@@ -169,6 +169,10 @@ def _auth_code(value: str, state: str | None = None) -> str:
     raise RuntimeError("That address does not contain a sign-in code.")
 
 
+# Always passed to the game. CustomSkinLoader crashes the client when another mod already
+# changed a class it patches; with this flag it skips that patch instead of crashing.
+FORCED_JVM_FLAGS = ("-Dcustomskinloader.ignorePatchFailure=true",)
+
 LIVE_SCOPE = "service::user.auth.xboxlive.com::MBI_SSL"
 LIVE_TOKEN_URL = "https://login.live.com/oauth20_token.srf"
 
@@ -326,10 +330,8 @@ class Game:
             raise RuntimeError("Could not install Java 21.")
 
         callback.get("setStatus", lambda text: None)(f"Installing NeoForge {neoforge}")
-        loader._base.get_minecraft_versions = lambda stable_only=False: [minecraft]
-        loader._base.get_loader_versions = lambda minecraft_version, stable_only=False: [neoforge]
         try:
-            loader.install(minecraft, self.directory, loader_version=neoforge, callback=callback, java=java)
+            _install_neoforge(self.directory, neoforge, java, callback)
         except subprocess.CalledProcessError as error:
             detail = (error.stderr or b"").decode("utf-8", "replace").strip()
             tail = detail[-500:] if detail else "the installer failed"
@@ -362,6 +364,10 @@ class Game:
         jvm = list(extra)
         if not any(item.startswith("-Xmx") for item in extra):
             jvm.insert(0, f"-Xmx{ram}G")
+        for flag in FORCED_JVM_FLAGS:
+            key = flag.split("=", 1)[0] + "="
+            if not any(item.startswith(key) for item in jvm):
+                jvm.append(flag)
         options = {
             "username": username,
             "uuid": user_id,
@@ -583,6 +589,79 @@ def _windowless_java(java: str) -> str:
     if windowless.is_file():
         return str(windowless)
     return java
+
+
+def _release_installer_url(neoforge: str) -> str | None:
+    """Offline ("fat") NeoForge installer uploaded to the modpack GitHub release.
+
+    GitHub is reachable where maven.neoforged.net is blocked, and the fat installer
+    carries every library it needs, so it runs with --offline.
+    """
+    from common import load_config
+    from drive_sync import folder_id_from
+
+    key = folder_id_from(load_config().get("drive_folder_id", ""))
+    if not key:
+        return None
+    owner, repo, tag = key.split("/", 2)
+    return f"https://github.com/{owner}/{repo}/releases/download/{tag}/neoforge-{neoforge}-installer.jar"
+
+
+def _install_neoforge(directory: Path, neoforge: str, java: str, callback: dict) -> None:
+    from minecraft_launcher_lib._helper import SUBPROCESS_STARTUP_INFO
+    from minecraft_launcher_lib.vanilla_launcher import (
+        create_empty_vanilla_launcher_profiles_file,
+        do_vanilla_launcher_profiles_exists,
+    )
+
+    helper = sys.modules["minecraft_launcher_lib._helper"]
+    if not do_vanilla_launcher_profiles_exists(directory):
+        create_empty_vanilla_launcher_profiles_file(directory)
+
+    sources = []
+    release = _release_installer_url(neoforge)
+    if release:
+        sources.append((release, True))
+    sources.append((
+        f"https://maven.neoforged.net/releases/net/neoforged/neoforge/{neoforge}/neoforge-{neoforge}-installer.jar",
+        False,
+    ))
+
+    import tempfile
+
+    downloaded = False
+    last = None
+    for index, (url, offline) in enumerate(sources):
+        with tempfile.TemporaryDirectory(prefix="lotmcraft-neoforge-") as tempdir:
+            installer = os.path.join(tempdir, "neoforge-installer.jar")
+            try:
+                if not helper.download_file(url, installer, overwrite=True) or not os.path.isfile(installer):
+                    continue
+            except Exception as error:
+                last = error
+                continue
+            downloaded = True
+            callback.get("setStatus", lambda text: None)("Running installer")
+            command = [java, "-jar", installer, "--install-client", str(directory)]
+            if offline:
+                command.append("--offline")
+            try:
+                subprocess.run(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    cwd=tempdir,
+                    check=True,
+                    startupinfo=SUBPROCESS_STARTUP_INFO,
+                )
+                return
+            except subprocess.CalledProcessError as error:
+                if index == len(sources) - 1:
+                    raise
+                last = error
+    if not downloaded:
+        raise RuntimeError("Could not download neoforge-installer.jar. Check the internet connection.") from last
+    raise last
 
 
 def _version_json(directory: Path, version: str) -> Path:
